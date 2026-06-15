@@ -1,0 +1,11 @@
+[package]
+name = "water-tank"
+version = "0.1.0"
+edition = "2021"
+description = "A side-on water sloshing toy — a tank of water on a slow see-saw tilt."
+
+[dependencies]
+macroquad = "0.4"
+
+[profile.release]
+opt-level = 3
