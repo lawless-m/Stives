@@ -97,3 +97,90 @@ impl Default for TiltController {
         Self::new()
     }
 }
+
+// ----------------------------------------------------------------------------
+// 2D tilt (Phase 2). A tilt *vector* drives the 2D sim. The auto behaviour is
+// precession — the tilt direction slowly rotates so waves chase around the
+// tank (docs/04-phase2-isometric.md). Kept as a separate, small controller so
+// the Phase 1 path above stays untouched.
+// ----------------------------------------------------------------------------
+
+/// Seconds for the auto tilt direction to precess once around.
+pub const PRECESS_PERIOD: f32 = 13.0;
+
+/// Peak tilt magnitude on each axis in 2D mode, radians (~6°).
+pub const TILT_2D_MAX_ANGLE: f32 = 0.10;
+
+/// Owns the 2D tilt vector and how it evolves.
+pub struct Tilt2dController {
+    mode: TiltMode,
+    x: f32,
+    y: f32,
+    manual_x: f32,
+    manual_y: f32,
+    time: f32,
+}
+
+impl Tilt2dController {
+    /// Starts in Auto precession — set it down and watch.
+    pub fn new() -> Self {
+        Self {
+            mode: TiltMode::Auto,
+            x: TILT_2D_MAX_ANGLE,
+            y: 0.0,
+            manual_x: 0.0,
+            manual_y: 0.0,
+            time: 0.0,
+        }
+    }
+
+    /// Advance by `dt` seconds, updating the tilt vector per the mode.
+    pub fn advance(&mut self, dt: f32) {
+        match self.mode {
+            TiltMode::Auto => {
+                // Constant-magnitude tilt whose direction rotates slowly.
+                self.time += dt;
+                let a = TAU * self.time / PRECESS_PERIOD;
+                self.x = TILT_2D_MAX_ANGLE * a.cos();
+                self.y = TILT_2D_MAX_ANGLE * a.sin();
+            }
+            TiltMode::Manual => {
+                self.x = self.manual_x;
+                self.y = self.manual_y;
+            }
+        }
+    }
+
+    /// The tilt pad was touched: take over in Manual at the given vector.
+    pub fn set_manual(&mut self, x: f32, y: f32) {
+        self.mode = TiltMode::Manual;
+        self.manual_x = x.clamp(-TILT_2D_MAX_ANGLE, TILT_2D_MAX_ANGLE);
+        self.manual_y = y.clamp(-TILT_2D_MAX_ANGLE, TILT_2D_MAX_ANGLE);
+        self.x = self.manual_x;
+        self.y = self.manual_y;
+    }
+
+    /// Hand control back to auto precession, re-phasing from the current
+    /// direction so the tilt doesn't snap.
+    pub fn set_auto(&mut self) {
+        self.mode = TiltMode::Auto;
+        let a = self.y.atan2(self.x);
+        self.time = a * PRECESS_PERIOD / TAU;
+    }
+
+    pub fn mode(&self) -> TiltMode {
+        self.mode
+    }
+    pub fn tilt_x(&self) -> f32 {
+        self.x
+    }
+    pub fn tilt_y(&self) -> f32 {
+        self.y
+    }
+}
+
+impl Default for Tilt2dController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
