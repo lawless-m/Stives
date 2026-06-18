@@ -21,9 +21,10 @@ use crate::sim::{self, WaterSim};
 const SCREEN_MARGIN_FRAC: f32 = 0.12;
 /// Tank drawing aspect ratio (width : height).
 const TANK_ASPECT: f32 = 2.2;
-/// Fraction of the tank's height that a *resting* (full) tank fills, leaving
-/// headroom above for crests so big waves don't clip the rim.
-const REST_FILL_FRAC: f32 = 0.55;
+/// Fraction of the tank's height that a *resting* tank fills, leaving headroom
+/// above for crests so big waves don't clip the rim. Lower = a shallower, less
+/// full tank (waves scale down with it).
+const REST_FILL_FRAC: f32 = 0.40;
 
 const WATER_COLOR: Color = Color::new(0.18, 0.52, 0.90, 1.0);
 const WATER_SURFACE_COLOR: Color = Color::new(0.55, 0.80, 1.00, 1.0);

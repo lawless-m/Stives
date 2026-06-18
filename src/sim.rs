@@ -28,8 +28,53 @@ pub const GRAVITY: f32 = 5.0;
 
 /// Per-substep velocity damping multiplier (`< 1.0`). Lets the water settle
 /// between and within tilts, matching the original's calm-between-tips feel.
-/// `1.0` would be no damping.
-pub const DAMPING: f32 = 0.9997;
+/// `1.0` would be no damping. At the default `DT` (~250 substeps/sec) this
+/// works out to roughly a quarter of the wave energy lost per second, so a
+/// slosh visibly settles over a few seconds rather than ringing on.
+pub const DAMPING: f32 = 0.999;
+
+/// Turbulence forcing strength. Each substep adds a random velocity kick scaled
+/// by the *local* flow speed, so moving water roughens into chop while still
+/// water stays glassy and settles flat. The kick is smoothed across cells (see
+/// `CHOP_SMOOTH`) so it drives rolling ripples, not grid-scale buzz. A pure 1D
+/// shallow-water scheme is otherwise perfectly laminar. `0.0` restores it.
+pub const TURBULENCE: f32 = 1.2;
+
+/// Spatial smoothing for the turbulence kick — a 1-pole low-pass swept across
+/// the cells each step. Lower = smoother, longer-wavelength chop; `1.0` = raw
+/// per-cell white noise (the buzzy, high-frequency leading-edge look).
+pub const CHOP_SMOOTH: f32 = 0.2;
+
+/// Width, in cells, of the absorbing "sponge" zone at each wall.
+const SPONGE_CELLS: usize = 12;
+
+/// Peak extra per-substep velocity damping right at a wall, ramping to none at
+/// the inner edge of the sponge. The walls reflect (volume is still conserved),
+/// but reflected waves lose a little energy and scatter, so the surface no
+/// longer rings with mirror-perfect standing waves. `0.0` = perfect mirror.
+pub const WALL_ABSORPTION: f32 = 0.06;
+
+/// Spike control: a conservative height diffusion that shaves steep one-cell
+/// overshoots — wall run-up jets and the crest of a near-vertical slosh front.
+/// It engages only where the jump between adjacent columns exceeds
+/// `SHOCK_THRESHOLD`, so the broad slosh crest and the surface chop (both gentle
+/// gradients) pass through untouched. Flux form with no-flux walls conserves
+/// volume exactly. `0.0` disables it.
+pub const SHOCK_SMOOTH: f32 = 0.3;
+
+/// Adjacent-column height jump (sim units) at which `SHOCK_SMOOTH` begins to
+/// engage, ramping to full at twice this. Set above the gradients of normal
+/// waves and chop so only true spikes and steep fronts are touched.
+pub const SHOCK_THRESHOLD: f32 = 0.1;
+
+/// Hyperviscosity coefficient — a biharmonic (∇⁴) filter applied to the
+/// *velocity* field each substep. This staggered scheme is dispersive: the
+/// grid-scale (2-cell) waves travel at the wrong speed and get shed as ripples
+/// off steep fronts. A ∇⁴ filter damps ∝ k⁴, so it scrubs that grid noise hard
+/// while leaving the resolved slosh and chop essentially untouched (a plain ∇²
+/// would smear them). Acting on velocity rather than height keeps water volume
+/// exactly conserved. Must stay under the stability limit ~1/16; `0.0` disables.
+pub const HYPERVISCOSITY: f32 = 0.04;
 
 /// Fixed physics timestep, in seconds (the sim is stepped on an accumulator).
 /// Chosen well inside the CFL stability limit for the constants above.
@@ -56,6 +101,11 @@ pub struct WaterSim {
     vel: Vec<f32>,
     /// Scratch buffer for per-face flux, kept around to avoid per-frame allocs.
     flux: Vec<f32>,
+    /// Scratch buffer for the hyperviscosity filter (holds ∇² of velocity
+    /// between the two biharmonic passes).
+    scratch: Vec<f32>,
+    /// State for the internal PRNG that drives the turbulence forcing.
+    rng: u32,
 }
 
 impl WaterSim {
@@ -65,6 +115,8 @@ impl WaterSim {
             heights: vec![REST_HEIGHT; NUM_CELLS],
             vel: vec![0.0; NUM_CELLS + 1],
             flux: vec![0.0; NUM_CELLS + 1],
+            scratch: vec![0.0; NUM_CELLS + 1],
+            rng: 0x9E3779B9,
         }
     }
 
@@ -89,12 +141,40 @@ impl WaterSim {
 
         // 1. Update velocities on the interior faces. Walls (face 0 and
         //    NUM_CELLS) are reflecting and remain exactly 0.0.
+        // Smoothed noise, low-passed as we sweep left→right so the turbulence
+        // drives longer-wavelength chop rather than grid-scale buzz.
+        let mut chop = 0.0_f32;
         for i in 1..NUM_CELLS {
             let height_gradient = (self.heights[i] - self.heights[i - 1]) / DX;
             // Pressure (restoring) force pushes from tall columns to short ones;
             // the tilt term drives the bulk slosh.
-            self.vel[i] += dt * (-GRAVITY * height_gradient + g_horizontal);
-            self.vel[i] *= DAMPING;
+            let mut u = self.vel[i] + dt * (-GRAVITY * height_gradient + g_horizontal);
+            // Turbulence: motion breeds chop. A smoothed, flow-scaled random kick
+            // roughens moving water into rolling ripples; still water stays glassy.
+            chop += CHOP_SMOOTH * (self.next_noise() - chop);
+            u += dt * TURBULENCE * u.abs() * chop;
+            u *= DAMPING;
+            // Sponge layer: extra damping ramping up toward the nearest wall, so
+            // reflections come back softened and scattered, not mirror-perfect.
+            let d_wall = i.min(NUM_CELLS - i);
+            if d_wall < SPONGE_CELLS {
+                let ramp = 1.0 - d_wall as f32 / SPONGE_CELLS as f32;
+                u *= 1.0 - WALL_ABSORPTION * ramp;
+            }
+            self.vel[i] = u;
+        }
+
+        // 1b. Hyperviscosity: a biharmonic (∇⁴) filter on velocity that scrubs
+        //     the grid-scale dispersive ripples off steep fronts while leaving
+        //     resolved motion alone. Walls (faces 0 and NUM_CELLS) stay 0.
+        self.scratch[0] = 0.0;
+        self.scratch[NUM_CELLS] = 0.0;
+        for i in 1..NUM_CELLS {
+            self.scratch[i] = self.vel[i - 1] - 2.0 * self.vel[i] + self.vel[i + 1];
+        }
+        for i in 1..NUM_CELLS {
+            let lap2 = self.scratch[i - 1] - 2.0 * self.scratch[i] + self.scratch[i + 1];
+            self.vel[i] -= HYPERVISCOSITY * lap2;
         }
 
         // 2. Compute upwind flux on each face. Ends stay 0 (no flow through
@@ -115,6 +195,38 @@ impl WaterSim {
             let net = (self.flux[i + 1] - self.flux[i]) / DX;
             self.heights[i] = (self.heights[i] - dt * net).max(MIN_HEIGHT);
         }
+
+        // 4. Spike control: shave steep one-cell overshoots — wall run-up jets
+        //    and the crest of a near-vertical slosh front — with a conservative
+        //    height diffusion that engages only on steep jumps. Flux form
+        //    (no-flux walls, stored in scratch) keeps total volume exact.
+        for i in 0..NUM_CELLS - 1 {
+            let jump = self.heights[i] - self.heights[i + 1];
+            // Ramp in over steep jumps only; gentle gradients (waves, chop) give
+            // steep = 0 and pass untouched.
+            let steep = ((jump.abs() - SHOCK_THRESHOLD) / SHOCK_THRESHOLD).clamp(0.0, 1.0);
+            // Store in `scratch`, not `flux`: clobbering flux[0] would leave a
+            // stale nonzero flux on the left wall for the next step's transport.
+            self.scratch[i] = SHOCK_SMOOTH * steep * jump; // conservative flux cell i -> i+1
+        }
+        let mut left_flux = 0.0_f32;
+        for i in 0..NUM_CELLS {
+            let right_flux = if i < NUM_CELLS - 1 { self.scratch[i] } else { 0.0 };
+            self.heights[i] += left_flux - right_flux;
+            left_flux = right_flux;
+        }
+    }
+
+    /// Internal xorshift32 PRNG → uniform noise in `[-1, 1]`, driving the
+    /// turbulence forcing. Kept self-contained so this module stays free of any
+    /// `rand`/rendering dependency (the architecture rule above).
+    fn next_noise(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
     // --- Read-only accessors for the renderer (state, never internals) ---

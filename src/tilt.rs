@@ -11,11 +11,16 @@ use crate::sim::TAU;
 // Tunables (docs/02-phase1-spec.md).
 // ----------------------------------------------------------------------------
 
-/// Auto see-saw period in seconds — slow, meant to be hypnotic, not frantic.
-pub const AUTO_PERIOD: f32 = 7.0;
+/// Auto see-saw period in seconds. The tank's natural slosh period is ~3.6s
+/// (the fundamental standing-wave mode for this width and depth), so a forcing
+/// period near it pumps energy *resonantly* into the slosh — waves build up and
+/// crest. Going right to ~3.6 over-drives it — the water slams the walls and
+/// nearly empties one end. 5.5 sits off resonance: a lively roll that crests
+/// without violently draining. Lower toward 4 for crashier, raise for calmer.
+pub const AUTO_PERIOD: f32 = 5.5;
 
-/// Auto see-saw peak tilt angle, radians (~7°).
-pub const AUTO_MAX_ANGLE: f32 = 0.12;
+/// Auto see-saw peak tilt angle, radians (~9.7°).
+pub const AUTO_MAX_ANGLE: f32 = 0.17;
 
 /// Half-range of the manual slider, radians (~11°). Slider spans `±` this.
 pub const MANUAL_MAX_ANGLE: f32 = 0.20;
@@ -105,11 +110,13 @@ impl Default for TiltController {
 // the Phase 1 path above stays untouched.
 // ----------------------------------------------------------------------------
 
-/// Seconds for the auto tilt direction to precess once around.
-pub const PRECESS_PERIOD: f32 = 13.0;
+/// Seconds for the auto tilt direction to precess once around. Near the tank's
+/// ~3.6s natural slosh period the rotating drive excites a travelling wave that
+/// chases around the tank; 13s was so slow the water just sat in a corner.
+pub const PRECESS_PERIOD: f32 = 6.0;
 
-/// Peak tilt magnitude on each axis in 2D mode, radians (~6°).
-pub const TILT_2D_MAX_ANGLE: f32 = 0.10;
+/// Peak tilt magnitude on each axis in 2D mode, radians (~7.5°).
+pub const TILT_2D_MAX_ANGLE: f32 = 0.13;
 
 /// Owns the 2D tilt vector and how it evolves.
 pub struct Tilt2dController {

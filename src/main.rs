@@ -61,31 +61,39 @@ async fn run_side_on() {
     let mut water = WaterSim::new();
     let mut tilt = TiltController::new();
     let mut accumulator = 0.0_f32;
+    let mut paused = false;
 
     loop {
         let ui = Ui::layout();
-        handle_input_side_on(&ui, &mut tilt, &mut water);
+        handle_input_side_on(&ui, &mut tilt, &mut water, &mut paused);
 
-        accumulator += get_frame_time().min(MAX_FRAME_TIME);
-        while accumulator >= sim::DT {
-            tilt.advance(sim::DT);
-            water.step(sim::DT, tilt.angle());
-            accumulator -= sim::DT;
+        if paused {
+            accumulator = 0.0;
+        } else {
+            accumulator += get_frame_time().min(MAX_FRAME_TIME);
+            while accumulator >= sim::DT {
+                tilt.advance(sim::DT);
+                water.step(sim::DT, tilt.angle());
+                accumulator -= sim::DT;
+            }
         }
 
         clear_background(render::background_color());
         render::draw_tank(&water, tilt.angle());
-        ui.draw(&tilt);
+        ui.draw(&tilt, paused);
 
         next_frame().await;
     }
 }
 
-fn handle_input_side_on(ui: &Ui, tilt: &mut TiltController, water: &mut WaterSim) {
+fn handle_input_side_on(ui: &Ui, tilt: &mut TiltController, water: &mut WaterSim, paused: &mut bool) {
     let (mx, my) = mouse_position();
     let pressed = is_mouse_button_pressed(MouseButton::Left);
     let down = is_mouse_button_down(MouseButton::Left);
 
+    if pressed && ui.pause_btn.contains(mx, my) {
+        *paused = !*paused;
+    }
     if pressed && ui.calm_btn.contains(mx, my) {
         water.reset();
     }
@@ -97,7 +105,14 @@ fn handle_input_side_on(ui: &Ui, tilt: &mut TiltController, water: &mut WaterSim
     }
 
     // Slider: touching it takes over in manual mode; dragging keeps setting.
-    let grabbing = (pressed && ui.slider.contains(mx, my)) || (down && ui.dragging_zone(my));
+    // Exclude the buttons, which share the slider's vertical band: otherwise a
+    // click on Mode would re-grab the slider into Manual on the same press, so
+    // you could never toggle back to Auto.
+    let over_button = ui.pause_btn.contains(mx, my)
+        || ui.mode_btn.contains(mx, my)
+        || ui.calm_btn.contains(mx, my);
+    let grabbing = !over_button
+        && ((pressed && ui.slider.contains(mx, my)) || (down && ui.dragging_zone(my)));
     if grabbing {
         let t = ((mx - ui.slider.x) / ui.slider.w).clamp(0.0, 1.0);
         tilt.set_manual((t * 2.0 - 1.0) * MANUAL_MAX_ANGLE);
@@ -112,31 +127,39 @@ async fn run_iso() {
     let mut water = WaterSim2d::new();
     let mut tilt = Tilt2dController::new();
     let mut accumulator = 0.0_f32;
+    let mut paused = false;
 
     loop {
         let ui = Ui2d::layout();
-        handle_input_iso(&ui, &mut tilt, &mut water);
+        handle_input_iso(&ui, &mut tilt, &mut water, &mut paused);
 
-        accumulator += get_frame_time().min(MAX_FRAME_TIME);
-        while accumulator >= sim::DT {
-            tilt.advance(sim::DT);
-            water.step(sim::DT, tilt.tilt_x(), tilt.tilt_y());
-            accumulator -= sim::DT;
+        if paused {
+            accumulator = 0.0;
+        } else {
+            accumulator += get_frame_time().min(MAX_FRAME_TIME);
+            while accumulator >= sim::DT {
+                tilt.advance(sim::DT);
+                water.step(sim::DT, tilt.tilt_x(), tilt.tilt_y());
+                accumulator -= sim::DT;
+            }
         }
 
         clear_background(render_iso::background_color());
         render_iso::draw_tank(&water);
-        ui.draw(&tilt);
+        ui.draw(&tilt, paused);
 
         next_frame().await;
     }
 }
 
-fn handle_input_iso(ui: &Ui2d, tilt: &mut Tilt2dController, water: &mut WaterSim2d) {
+fn handle_input_iso(ui: &Ui2d, tilt: &mut Tilt2dController, water: &mut WaterSim2d, paused: &mut bool) {
     let (mx, my) = mouse_position();
     let pressed = is_mouse_button_pressed(MouseButton::Left);
     let down = is_mouse_button_down(MouseButton::Left);
 
+    if pressed && ui.pause_btn.contains(mx, my) {
+        *paused = !*paused;
+    }
     if pressed && ui.calm_btn.contains(mx, my) {
         water.reset();
     }
@@ -194,9 +217,10 @@ impl Rect2 {
     }
 }
 
-/// Side-on UI: slider + mode toggle + calm, along the bottom.
+/// Side-on UI: slider + pause + mode toggle + calm, along the bottom.
 struct Ui {
     slider: Rect2,
+    pause_btn: Rect2,
     mode_btn: Rect2,
     calm_btn: Rect2,
 }
@@ -209,20 +233,21 @@ impl Ui {
 
         let calm_btn = Rect2 { x: sw - pad - btn_w, y: bar_y, w: btn_w, h: btn_h };
         let mode_btn = Rect2 { x: calm_btn.x - pad - btn_w, y: bar_y, w: btn_w, h: btn_h };
+        let pause_btn = Rect2 { x: mode_btn.x - pad - btn_w, y: bar_y, w: btn_w, h: btn_h };
         let slider = Rect2 {
             x: pad,
             y: bar_y + btn_h * 0.5 - 4.0,
-            w: mode_btn.x - 2.0 * pad,
+            w: pause_btn.x - 2.0 * pad,
             h: 8.0,
         };
-        Ui { slider, mode_btn, calm_btn }
+        Ui { slider, pause_btn, mode_btn, calm_btn }
     }
 
     fn dragging_zone(&self, my: f32) -> bool {
         (my - (self.slider.y + self.slider.h * 0.5)).abs() < 28.0
     }
 
-    fn draw(&self, tilt: &TiltController) {
+    fn draw(&self, tilt: &TiltController, paused: bool) {
         let track = self.slider;
         draw_rectangle(track.x, track.y, track.w, track.h, Color::new(0.25, 0.27, 0.32, 1.0));
         let mid_x = track.x + track.w * 0.5;
@@ -237,15 +262,17 @@ impl Ui {
             TiltMode::Auto => "Mode: Auto",
             TiltMode::Manual => "Mode: Manual",
         };
+        draw_button(self.pause_btn, if paused { "Play" } else { "Pause" });
         draw_button(self.mode_btn, mode_label);
         draw_button(self.calm_btn, "Calm");
         draw_hint("Drag the slider to tip the tank.  Mode toggles the see-saw.", track.x, track.y - 16.0);
     }
 }
 
-/// Iso UI: a 2D tilt pad + mode toggle + calm.
+/// Iso UI: a 2D tilt pad + pause + mode toggle + calm.
 struct Ui2d {
     pad: Rect2,
+    pause_btn: Rect2,
     mode_btn: Rect2,
     calm_btn: Rect2,
     dragging: bool,
@@ -259,12 +286,13 @@ impl Ui2d {
 
         let calm_btn = Rect2 { x: sw - pad_gap - btn_w, y: bar_y, w: btn_w, h: btn_h };
         let mode_btn = Rect2 { x: calm_btn.x - pad_gap - btn_w, y: bar_y, w: btn_w, h: btn_h };
+        let pause_btn = Rect2 { x: mode_btn.x - pad_gap - btn_w, y: bar_y, w: btn_w, h: btn_h };
         let pad_size = 88.0;
         let pad = Rect2 { x: pad_gap, y: sh - pad_gap - pad_size, w: pad_size, h: pad_size };
-        Ui2d { pad, mode_btn, calm_btn, dragging: ui_dragging() }
+        Ui2d { pad, pause_btn, mode_btn, calm_btn, dragging: ui_dragging() }
     }
 
-    fn draw(&self, tilt: &Tilt2dController) {
+    fn draw(&self, tilt: &Tilt2dController, paused: bool) {
         let p = self.pad;
         draw_rectangle(p.x, p.y, p.w, p.h, Color::new(0.16, 0.18, 0.22, 1.0));
         draw_rectangle_lines(p.x, p.y, p.w, p.h, 2.0, Color::new(0.40, 0.43, 0.50, 1.0));
@@ -281,6 +309,7 @@ impl Ui2d {
             TiltMode::Auto => "Mode: Auto",
             TiltMode::Manual => "Mode: Manual",
         };
+        draw_button(self.pause_btn, if paused { "Play" } else { "Pause" });
         draw_button(self.mode_btn, mode_label);
         draw_button(self.calm_btn, "Calm");
         draw_hint("Drag in the pad to tip the tank in 2D.  Auto precesses.", p.x, p.y - 12.0);
